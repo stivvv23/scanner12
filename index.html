@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Scanner Presensi Siswa (Debug)</title>
+
+<!-- html5-qrcode CDN -->
+<script src="https://unpkg.com/html5-qrcode@2.3.8/minified/html5-qrcode.min.js"></script>
+
+<style>
+  body{font-family:Arial,Helvetica,sans-serif; padding:12px; max-width:720px; margin:auto;}
+  #reader { width:100%; max-width:480px; margin:auto; border:1px solid #ddd; padding:8px; border-radius:8px;}
+  #preview { display:block; margin:10px auto; width:100%; max-width:480px; height:auto; border-radius:8px; background:#000;}
+  .row{display:flex; gap:8px; align-items:center; margin:8px 0; flex-wrap:wrap;}
+  button,input,textarea{padding:10px; border-radius:8px; font-size:14px;}
+  #log{white-space:pre-wrap; background:#f4f4f4; padding:8px; border-radius:6px; max-height:160px; overflow:auto; font-size:12px;}
+</style>
+</head>
+<body>
+<h2>📸 Presensi QR (Debug mode)</h2>
+
+<div id="reader">QR reader will appear here</div>
+
+<div class="row">
+  <button id="startCamBtn">Mulai Kamera Foto</button>
+  <button id="stopCamBtn" disabled>Stop Kamera</button>
+</div>
+
+<video id="preview" autoplay playsinline></video>
+
+<br/>
+<input type="text" id="note" placeholder="Catatan tambahan (opsional)" style="width:100%" />
+<br/><br/>
+<button id="sendBtn" disabled>Kirim Presensi (Scan dulu QR)</button>
+
+<h3>Log (debug)</h3>
+<div id="log">Ready.</div>
+
+<script>
+const logEl = document.getElementById('log');
+function log(...args){ console.log(...args); logEl.textContent += "\\n" + args.map(a => (typeof a === 'object' ? JSON.stringify(a) : a)).join(' '); logEl.scrollTop = logEl.scrollHeight; }
+
+// CONFIG
+const APPS_SCRIPT_URL = "PASTE_YOUR_APPS_SCRIPT_URL_HERE"; // ganti dengan URL Apps Script mu
+
+// Globals
+let lastScanned = "";
+let localStream = null;
+let capturedDataUrl = null;
+let html5QrCode = null;
+
+// Init QR scanner safely and attach error handlers
+function initQrScanner(){
+  try {
+    html5QrCode = new Html5Qrcode("reader");
+    html5QrCode.start(
+      { facingMode: "environment" },
+      { fps: 8, qrbox: 250 },
+      qrMsg => {
+        log("QR detected:", qrMsg);
+        lastScanned = qrMsg;
+        document.getElementById("sendBtn").disabled = false;
+        alert("QR terbaca: " + qrMsg);
+      },
+      err => {
+        // scanning error (non-critical)
+      }
+    ).then(()=> log("QR scanner started")).catch(err => {
+      log("QR scanner failed to start:", err);
+      // show note to user
+    });
+  } catch (e){
+    log("initQrScanner exception:", e);
+  }
+}
+
+// start camera for photo capture (stop QR first)
+async function startCameraForPhoto(){
+  try {
+    log("Request to start camera for photo: will stop QR scanner first (if running)...");
+    // stop QR scanner to free camera device
+    if (html5QrCode) {
+      try { await html5QrCode.stop(); log("QR scanner stopped"); } catch(e){ log("Error stopping QR scanner:", e); }
+    }
+    // request camera
+    const constraints = { video: { facingMode: { ideal: "environment" } }, audio: false };
+    log("Calling getUserMedia with constraints:", constraints);
+    localStream = await navigator.mediaDevices.getUserMedia(constraints);
+    log("getUserMedia success", localStream);
+    const videoEl = document.getElementById("preview");
+    videoEl.srcObject = localStream;
+    document.getElementById("startCamBtn").disabled = true;
+    document.getElementById("stopCamBtn").disabled = false;
+  } catch (err) {
+    log("Camera start failed:", err);
+    alert("Gagal akses kamera: " + (err.message || err.name));
+  }
+}
+
+function stopCameraForPhoto(){
+  try {
+    if (localStream) {
+      localStream.getTracks().forEach(t => t.stop());
+      localStream = null;
+      document.getElementById("preview").srcObject = null;
+      document.getElementById("startCamBtn").disabled = false;
+      document.getElementById("stopCamBtn").disabled = true;
+      log("Camera stopped");
+    }
+    // restart QR scanner so user can scan again
+    if (html5QrCode) {
+      html5QrCode.start(
+        { facingMode: "environment" },
+        { fps: 8, qrbox: 250 },
+        qrMsg => {
+          log("QR detected:", qrMsg);
+          lastScanned = qrMsg;
+          document.getElementById("sendBtn").disabled = false;
+          alert("QR terbaca: " + qrMsg);
+        }
+      ).then(()=> log("QR scanner restarted")).catch(err => log("QR restart error:", err));
+    }
+  } catch(e){
+    log("stopCamera error", e);
+  }
+}
+
+async function capturePhoto(){
+  if (!localStream) return null;
+  const video = document.getElementById("preview");
+  const w = 640, h = 480;
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, w, h);
+  // compress quality 0.6
+  const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
+  log("Captured photo length:", dataUrl.length);
+  return dataUrl;
+}
+
+// Send payload to Apps Script
+async function sendPresensi(){
+  if (!lastScanned) return alert("Silakan scan QR terlebih dahulu.");
+  const catatan = document.getElementById("note").value || "";
+  let lokasi = "-";
+  try {
+    const pos = await new Promise((res, rej) => navigator.geolocation.getCurrentPosition(res, rej, { timeout: 10000 }));
+    lokasi = pos.coords.latitude + "," + pos.coords.longitude;
+  } catch (e) {
+    log("Lokasi gagal:", e);
+  }
+  let foto = null;
+  try { foto = await capturePhoto(); } catch(e){ log("Capture photo failed:", e); }
+  const payload = {
+    nama: lastScanned,
+    lokasi,
+    catatan,
+    foto,
+    waktuClient: new Date().toISOString()
+  };
+  log("Sending payload:", { nama: payload.nama, lokasi: payload.lokasi, fotoLen: foto ? foto.length : 0 });
+  try {
+    const r = await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const j = await r.json();
+    log("Response:", j);
+    if (j.ok) {
+      alert("Presensi terkirim");
+      document.getElementById("sendBtn").disabled = true;
+      lastScanned = "";
+      document.getElementById("note").value = "";
+    } else {
+      alert("Gagal kirim: " + (j.error || JSON.stringify(j)));
+    }
+  } catch (err){
+    log("Send failed:", err);
+    alert("Error kirim: " + err.message);
+  }
+}
+
+// Button handlers
+document.getElementById("startCamBtn").addEventListener("click", startCameraForPhoto);
+document.getElementById("stopCamBtn").addEventListener("click", stopCameraForPhoto);
+document.getElementById("sendBtn").addEventListener("click", sendPresensi);
+
+// On page load init
+window.addEventListener('load', () => {
+  log("Page loaded. Initializing QR scanner...");
+  initQrScanner();
+});
+</script>
+</body>
+</html>
